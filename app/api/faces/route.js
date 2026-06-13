@@ -1,10 +1,11 @@
-import { getDb } from '@/lib/db';
+import { getDb, initDb } from '@/lib/db';
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
+    await initDb();
     const db = getDb();
     const result = await db.query(
       'SELECT id, name, created_at FROM registered_faces ORDER BY created_at DESC'
@@ -18,6 +19,7 @@ export async function GET() {
 
 export async function DELETE(request) {
   try {
+    await initDb();
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
     

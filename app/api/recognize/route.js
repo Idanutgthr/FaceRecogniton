@@ -1,8 +1,9 @@
-import { getDb } from '@/lib/db';
+import { getDb, initDb } from '@/lib/db';
 import { NextResponse } from 'next/server';
 
 export async function POST(request) {
   try {
+    await initDb();
     const { descriptor } = await request.json();
     
     if (!descriptor || !Array.isArray(descriptor) || descriptor.length !== 128) {

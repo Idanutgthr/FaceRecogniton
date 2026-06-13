@@ -8,6 +8,9 @@ export default function Home() {
   const [selectedModel, setSelectedModel] = useState('tiny'); // 'tiny' or 'ssd'
   const [loadingProgress, setLoadingProgress] = useState('');
   
+  // Selection Screen State: null (welcome menu), 'realtime', or 'capture'
+  const [scanType, setScanType] = useState(null);
+  
   // App state
   const [activeMode, setActiveMode] = useState('scan'); // 'scan' or 'register'
   const [showAdmin, setShowAdmin] = useState(false); // Controls admin drawer
@@ -30,6 +33,10 @@ export default function Home() {
   const [isRecognizing, setIsRecognizing] = useState(false);
   const [matchResult, setMatchResult] = useState(null);
   const [matchStatus, setMatchStatus] = useState('idle'); // 'idle', 'searching', 'matched', 'unknown', 'error'
+  
+  // Flicker prevention: Persist last matched name while searching
+  const [persistMatchedName, setPersistMatchedName] = useState(null);
+  const [isCapturing, setIsCapturing] = useState(false);
 
   // Refs for video & canvas
   const videoRef = useRef(null);
@@ -43,6 +50,7 @@ export default function Home() {
   const lastMatchTimeRef = useRef(0);
   const currentDescriptorRef = useRef(null);
   const selectedModelRef = useRef(selectedModel);
+  const scanTypeRef = useRef(scanType);
 
   useEffect(() => {
     activeModeRef.current = activeMode;
@@ -55,6 +63,10 @@ export default function Home() {
   useEffect(() => {
     selectedModelRef.current = selectedModel;
   }, [selectedModel]);
+
+  useEffect(() => {
+    scanTypeRef.current = scanType;
+  }, [scanType]);
 
   // 1. Dynamic import face-api.js inside useEffect to completely prevent SSR build failures
   useEffect(() => {
@@ -139,9 +151,6 @@ export default function Home() {
       
       setModelsLoaded(true);
       setLoadingProgress('');
-      
-      // Auto-start camera after models are loaded
-      startCamera();
     } catch (err) {
       console.error('Error loading models:', err);
       setLoadingProgress('Gagal memuat model weights.');
@@ -159,6 +168,11 @@ export default function Home() {
     
     if (faceapiRef.current) {
       await loadModels(faceapiRef.current, nextModel);
+    }
+    
+    // Restart camera if a mode was already selected
+    if (scanType) {
+      startCamera();
     }
   };
 
@@ -197,6 +211,10 @@ export default function Home() {
 
   // 7. Video play triggers detection loop
   const handleVideoPlay = () => {
+    restartDetectionLoop();
+  };
+
+  const restartDetectionLoop = () => {
     if (!videoRef.current || !canvasRef.current || !faceapiRef.current) return;
     
     const displaySize = {
@@ -209,8 +227,9 @@ export default function Home() {
     
     stopLoop();
     
-    // Run detection loop at ~15fps for real-time bounding box tracking,
-    // but throttle vector matching/database queries to 1.5 seconds intervals.
+    // Run detection loop at ~75ms interval for real-time bounding box tracking.
+    // Realtime matching queries Postgres every 1.5s.
+    // Capture mode only does local box rendering, no DB queries until clicked.
     loopRef.current = setInterval(async () => {
       await processFrame(displaySize);
     }, 75);
@@ -242,7 +261,7 @@ export default function Home() {
       : new faceapi.SsdMobilenetv1Options({ minConfidence: 0.55 });
       
     try {
-      // Run face detection + landmark + descriptors extraction on Client-side Web Worker/GPU
+      // Run face detection + landmark + descriptors extraction
       const detection = await faceapi
         .detectSingleFace(video, options)
         .withFaceLandmarks()
@@ -261,8 +280,8 @@ export default function Home() {
         ctx.lineWidth = 3;
         ctx.strokeRect(box.x, box.y, box.width, box.height);
         
-        // Trigger matching if in scanning mode
-        if (activeModeRef.current === 'scan') {
+        // Trigger matching if in scanning mode AND realtime scan type
+        if (activeModeRef.current === 'scan' && scanTypeRef.current === 'realtime') {
           const now = Date.now();
           if (now - lastMatchTimeRef.current > 1500 && !isRecognizingRef.current) {
             lastMatchTimeRef.current = now;
@@ -272,8 +291,11 @@ export default function Home() {
       } else {
         setFaceDetected(false);
         currentDescriptorRef.current = null;
-        if (activeModeRef.current === 'scan') {
+        if (activeModeRef.current === 'scan' && scanTypeRef.current === 'realtime') {
+          // Reset status only in realtime mode if face leaves camera
           setMatchStatus('idle');
+          setPersistMatchedName(null);
+          setMatchResult(null);
         }
       }
     } catch (err) {
@@ -296,9 +318,11 @@ export default function Home() {
       if (data.success) {
         if (data.match) {
           setMatchResult(data.matchedUser);
+          setPersistMatchedName(data.matchedUser.name);
           setMatchStatus('matched');
         } else {
           setMatchResult(null);
+          setPersistMatchedName(null);
           setMatchStatus('unknown');
         }
       } else {
@@ -312,7 +336,57 @@ export default function Home() {
     }
   };
 
-  // 10. Register face click handler
+  // 10. Capture & Match Single Frame Trigger (Capture Mode)
+  const handleCaptureAndRecognize = async () => {
+    if (!currentDescriptorRef.current) {
+      alert('Wajah tidak terdeteksi. Silakan menghadap ke kamera.');
+      return;
+    }
+    
+    setIsCapturing(true);
+    setMatchStatus('searching');
+    setPersistMatchedName(null);
+    
+    try {
+      const res = await fetch('/api/recognize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ descriptor: Array.from(currentDescriptorRef.current) })
+      });
+      const data = await res.json();
+      
+      if (data.success) {
+        if (data.match) {
+          setMatchResult(data.matchedUser);
+          setPersistMatchedName(data.matchedUser.name);
+          setMatchStatus('matched');
+        } else {
+          setMatchResult(null);
+          setPersistMatchedName(null);
+          setMatchStatus('unknown');
+        }
+        // Pause/stop the detection loop so the screen is frozen on the capture result
+        stopLoop();
+      } else {
+        setMatchStatus('error');
+      }
+    } catch (err) {
+      console.error('Capture match API call error:', err);
+      setMatchStatus('error');
+    } finally {
+      setIsCapturing(false);
+    }
+  };
+
+  // Reset capture results and restart tracking loop
+  const handleResetCapture = () => {
+    setMatchResult(null);
+    setPersistMatchedName(null);
+    setMatchStatus('idle');
+    restartDetectionLoop();
+  };
+
+  // 11. Register face click handler
   const handleRegisterFace = async (e) => {
     e.preventDefault();
     
@@ -344,8 +418,7 @@ export default function Home() {
         setRegisterName('');
         alert(`Berhasil mendaftarkan wajah "${registeredName}"!`);
         fetchUsers();
-        setActiveMode('scan');
-        setMatchStatus('idle');
+        handleModeSwitch('scan');
       } else {
         alert(`Gagal meregistrasi wajah: ${result.error}`);
       }
@@ -357,7 +430,7 @@ export default function Home() {
     }
   };
 
-  // 11. Delete face click handler
+  // 12. Delete face click handler
   const handleDeleteFace = async (id, name) => {
     if (!confirm(`Hapus biometrik wajah "${name}"?`)) {
       return;
@@ -372,7 +445,11 @@ export default function Home() {
         fetchUsers();
         if (matchResult && matchResult.id === id) {
           setMatchResult(null);
+          setPersistMatchedName(null);
           setMatchStatus('idle');
+          if (scanType === 'capture') {
+            restartDetectionLoop();
+          }
         }
       } else {
         alert(`Gagal menghapus: ${data.error}`);
@@ -382,11 +459,36 @@ export default function Home() {
     }
   };
 
+  // Selection Screen Switcher
+  const handleSelectMode = (type) => {
+    setScanType(type);
+    setMatchResult(null);
+    setPersistMatchedName(null);
+    setMatchStatus('idle');
+    // Start camera stream when mode is selected
+    startCamera();
+  };
+
+  // Back to Menu Home Screen
+  const handleBackToMenu = () => {
+    stopLoop();
+    stopCamera();
+    setScanType(null);
+    setMatchResult(null);
+    setPersistMatchedName(null);
+    setMatchStatus('idle');
+  };
+
   const handleModeSwitch = (mode) => {
     setActiveMode(mode);
     setRegisterName('');
     setMatchResult(null);
+    setPersistMatchedName(null);
     setMatchStatus('idle');
+    // If returning to scan in capture mode, restart camera tracking loop
+    if (mode === 'scan' && scanType === 'capture') {
+      restartDetectionLoop();
+    }
   };
 
   return (
@@ -398,237 +500,310 @@ export default function Home() {
         matchStatus === 'unknown' ? 'unknown' : ''
       }`}>
         
-        {/* Header Title */}
-        <div className="kiosk-header">
-          <div style={{ width: '30px' }}></div> {/* Spacer to center title */}
-          <h1 className="kiosk-title">FACE RECOGNITON</h1>
-          
-          {/* Admin Gear Button */}
-          <button 
-            className="admin-toggle-btn" 
-            onClick={() => setShowAdmin(!showAdmin)} 
-            title="Database & Settings"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-          </button>
-        </div>
-
-        {/* Camera Feed Window */}
-        <div className="kiosk-video-container">
-          {modelsLoaded && (
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              onPlay={handleVideoPlay}
-              className="kiosk-video"
-              style={{ display: hasCamera ? 'block' : 'none' }}
-            ></video>
-          )}
-
-          {modelsLoaded && hasCamera ? (
-            <>
-              {/* Corner target outlines */}
-              <div className="kiosk-target kt-tl"></div>
-              <div className="kiosk-target kt-tr"></div>
-              <div className="kiosk-target kt-bl"></div>
-              <div className="kiosk-target kt-br"></div>
+        {/* Render Welcome Screen Selection if scanType is null */}
+        {scanType === null ? (
+          <div className="welcome-container">
+            <h1 className="welcome-title-glow">SIAPAKAH DIA</h1>
+            <p className="welcome-subtitle">
+              Sistem verifikasi biometrik pengenalan wajah realtime berbasis teknologi jaringan saraf tiruan.
+            </p>
+            
+            <div className="welcome-menu">
+              <button 
+                className="mode-select-card" 
+                onClick={() => handleSelectMode('realtime')}
+                disabled={!modelsLoaded}
+              >
+                <span className="mode-select-title">📡 Pindai Real-time</span>
+                <span className="mode-select-subtext highlight">(Disarankan untuk Windows & macOS)</span>
+              </button>
               
-              {/* Scanning neon line */}
-              {activeMode === 'scan' && faceDetected && (
-                <div className="kiosk-scanner-line"></div>
+              <button 
+                className="mode-select-card" 
+                onClick={() => handleSelectMode('capture')}
+                disabled={!modelsLoaded}
+              >
+                <span className="mode-select-title">📸 Ambil Foto (1 Frame)</span>
+                <span className="mode-select-subtext highlight">(Disarankan untuk Android & iOS)</span>
+              </button>
+            </div>
+            
+            {!modelsLoaded && (
+              <div style={{ marginTop: '2.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                <span className="spinner"></span>
+                <span>{loadingProgress || 'Menyiapkan modul AI...'}</span>
+              </div>
+            )}
+          </div>
+        ) : (
+          /* Render Kiosk Scanner UI when a mode is active */
+          <>
+            {/* Header Title with Back Link and Settings */}
+            <div className="kiosk-header">
+              <button className="kiosk-back-btn" onClick={handleBackToMenu} disabled={isRegistering}>
+                ⟨ Menu
+              </button>
+              
+              <h1 className="kiosk-title" style={{ fontSize: '0.85rem' }}>
+                {scanType === 'realtime' ? 'Real-Time' : 'Capture Mode'}
+              </h1>
+              
+              {/* Admin Gear Button */}
+              <button 
+                className="admin-toggle-btn" 
+                onClick={() => setShowAdmin(!showAdmin)} 
+                title="Database & Settings"
+                disabled={isRegistering}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3"></circle>
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                </svg>
+              </button>
+            </div>
+
+            {/* Camera Feed Window */}
+            <div className="kiosk-video-container">
+              {modelsLoaded && (
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  onPlay={handleVideoPlay}
+                  className="kiosk-video"
+                  style={{ display: hasCamera ? 'block' : 'none' }}
+                ></video>
               )}
-              
-              <canvas ref={canvasRef} className="kiosk-canvas"></canvas>
-            </>
-          ) : (
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '1.5rem', color: 'var(--text-secondary)', background: '#04060b', zIndex: 15 }}>
-              {!faceapiLoaded ? (
+
+              {modelsLoaded && hasCamera ? (
                 <>
-                  <span className="spinner" style={{ margin: '0 auto 0.75rem', display: 'block' }}></span>
-                  <p style={{ fontSize: '0.8rem', fontWeight: 600 }}>{loadingProgress || 'Memuat AI...'}</p>
+                  {/* Corner target outlines */}
+                  <div className="kiosk-target kt-tl"></div>
+                  <div className="kiosk-target kt-tr"></div>
+                  <div className="kiosk-target kt-bl"></div>
+                  <div className="kiosk-target kt-br"></div>
+                  
+                  {/* Scanning neon line in realtime mode or during active loops */}
+                  {activeMode === 'scan' && faceDetected && loopRef.current && (
+                    <div className="kiosk-scanner-line"></div>
+                  )}
+                  
+                  <canvas ref={canvasRef} className="kiosk-canvas"></canvas>
                 </>
-              ) : !modelsLoaded ? (
+              ) : (
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '1.5rem', color: 'var(--text-secondary)', background: '#04060b', zIndex: 15 }}>
+                  {cameraError ? (
+                    <div style={{ color: 'var(--color-error)' }}>
+                      <p style={{ fontSize: '1.25rem', marginBottom: '0.25rem' }}>⚠️</p>
+                      <p style={{ fontSize: '0.75rem', maxWidth: '250px', margin: '0 auto' }}>{cameraError}</p>
+                      <button 
+                        className="drawer-mini-btn" 
+                        style={{ marginTop: '0.75rem', marginInline: 'auto' }}
+                        onClick={startCamera}
+                      >
+                        Coba Lagi
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <span className="spinner" style={{ margin: '0 auto 0.75rem', display: 'block' }}></span>
+                      <p style={{ fontSize: '0.8rem' }}>Membuka kamera...</p>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Dynamic Status Text below Camera */}
+            <div className="kiosk-feedback-wrapper">
+              {activeMode === 'scan' ? (
                 <>
-                  <span className="spinner" style={{ margin: '0 auto 0.75rem', display: 'block' }}></span>
-                  <p style={{ fontSize: '0.8rem', fontWeight: 600 }}>{loadingProgress}</p>
+                  <span className="kiosk-status-label">
+                    {matchStatus === 'searching' && !persistMatchedName ? 'Menganalisis Biometrik...' : 'Anda Terdeteksi Sebagai'}
+                  </span>
+                  <span className={`kiosk-name-label ${
+                    matchStatus === 'matched' || (matchStatus === 'searching' && persistMatchedName) ? 'matched' :
+                    matchStatus === 'unknown' ? 'unknown' :
+                    faceDetected ? 'detected' : ''
+                  }`}>
+                    {persistMatchedName ? persistMatchedName.toUpperCase() :
+                     matchStatus === 'unknown' ? 'WAJAH TIDAK DIKENAL' :
+                     matchStatus === 'searching' ? 'MENCARI...' :
+                     faceDetected ? 'DETEKSI AKTIF...' : '(TIDAK ADA DETEKSI)'}
+                  </span>
                 </>
-              ) : cameraError ? (
-                <div style={{ color: 'var(--color-error)' }}>
-                  <p style={{ fontSize: '1.25rem', marginBottom: '0.25rem' }}>⚠️</p>
-                  <p style={{ fontSize: '0.75rem', maxWidth: '250px', margin: '0 auto' }}>{cameraError}</p>
+              ) : (
+                <>
+                  <span className="kiosk-status-label" style={{ marginBottom: '0.15rem' }}>Registrasi Wajah</span>
+                  <input
+                    type="text"
+                    className="kiosk-input"
+                    placeholder="Masukkan nama lengkap"
+                    value={registerName}
+                    onChange={(e) => setRegisterName(e.target.value)}
+                    disabled={isRegistering}
+                    style={{ height: '40px', padding: '0 12px', fontSize: '0.85rem', textAlign: 'center' }}
+                    maxLength={40}
+                  />
+                </>
+              )}
+            </div>
+
+            {/* Bottom Actions based on scanType */}
+            <div style={{ width: '100%' }}>
+              {activeMode === 'scan' ? (
+                /* Scanning mode buttons */
+                scanType === 'realtime' ? (
+                  /* Real-time Mode Actions */
+                  <button 
+                    className="kiosk-btn-pill" 
+                    onClick={() => handleModeSwitch('register')}
+                    disabled={!modelsLoaded}
+                  >
+                    DAFTAR SEKARANG
+                  </button>
+                ) : (
+                  /* Capture 1 Frame Mode Actions */
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '100%' }}>
+                    {matchStatus === 'matched' || matchStatus === 'unknown' ? (
+                      /* If snapshot is captured and has results, show restart button */
+                      <>
+                        <button className="kiosk-btn-pill kiosk-btn-primary" onClick={handleResetCapture}>
+                          🔄 PINDAI LAGI
+                        </button>
+                        <button 
+                          className="drawer-mini-btn" 
+                          style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.8rem', padding: '4px', alignSelf: 'center' }}
+                          onClick={() => handleModeSwitch('register')}
+                        >
+                          Daftar Biometrik Ini
+                        </button>
+                      </>
+                    ) : (
+                      /* Otherwise, show Capture button */
+                      <>
+                        <button 
+                          className="kiosk-btn-pill kiosk-btn-primary"
+                          onClick={handleCaptureAndRecognize}
+                          disabled={isCapturing || !faceDetected}
+                        >
+                          {isCapturing ? <span className="spinner"></span> : '📸 AMBIL FOTO & COCOKKAN'}
+                        </button>
+                        <button 
+                          className="drawer-mini-btn" 
+                          style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.8rem', padding: '4px', alignSelf: 'center' }}
+                          onClick={() => handleModeSwitch('register')}
+                        >
+                          Registrasi Baru
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )
+              ) : (
+                /* Registration Mode Actions (Shared) */
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '100%' }}>
+                  <button 
+                    className="kiosk-btn-pill kiosk-btn-primary" 
+                    onClick={handleRegisterFace}
+                    disabled={isRegistering || !faceDetected || !registerName.trim()}
+                  >
+                    {isRegistering ? <span className="spinner"></span> : 'SIMPAN WAJAH'}
+                  </button>
                   <button 
                     className="drawer-mini-btn" 
-                    style={{ marginTop: '0.75rem', marginInline: 'auto' }}
-                    onClick={startCamera}
+                    style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.8rem', padding: '4px', alignSelf: 'center' }}
+                    onClick={() => handleModeSwitch('scan')}
+                    disabled={isRegistering}
                   >
-                    Coba Lagi
+                    Batal
                   </button>
                 </div>
-              ) : (
-                <>
-                  <span className="spinner" style={{ margin: '0 auto 0.75rem', display: 'block' }}></span>
-                  <p style={{ fontSize: '0.8rem' }}>Membuka kamera...</p>
-                </>
               )}
             </div>
-          )}
-        </div>
 
-        {/* Dynamic Status Text below Camera */}
-        <div className="kiosk-feedback-wrapper">
-          {activeMode === 'scan' ? (
-            <>
-              <span className="kiosk-status-label">
-                {matchStatus === 'searching' ? 'Menganalisis Biometrik...' : 'Anda Terdeteksi Sebagai'}
-              </span>
-              <span className={`kiosk-name-label ${
-                matchStatus === 'matched' ? 'matched' :
-                matchStatus === 'unknown' ? 'unknown' :
-                faceDetected ? 'detected' : ''
-              }`}>
-                {matchStatus === 'matched' && matchResult ? matchResult.name.toUpperCase() :
-                 matchStatus === 'unknown' ? 'WAJAH TIDAK DIKENAL' :
-                 matchStatus === 'searching' ? 'MENCARI...' :
-                 faceDetected ? 'DETEKSI AKTIF...' : '(TIDAK ADA DETEKSI)'}
-              </span>
-            </>
-          ) : (
-            <>
-              <span className="kiosk-status-label" style={{ marginBottom: '0.15rem' }}>Registrasi Wajah</span>
-              <input
-                type="text"
-                className="kiosk-input"
-                placeholder="Masukkan nama lengkap"
-                value={registerName}
-                onChange={(e) => setRegisterName(e.target.value)}
-                disabled={isRegistering}
-                style={{ height: '40px', padding: '0 12px', fontSize: '0.85rem', textAlign: 'center' }}
-                maxLength={40}
-              />
-            </>
-          )}
-        </div>
+            {/* Sliding Admin Drawer Overlay */}
+            <div className={`admin-drawer ${showAdmin ? 'open' : ''}`}>
+              <div className="drawer-header">
+                <h3 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Pengaturan & Basis Data</h3>
+                <button className="drawer-close-btn" onClick={() => setShowAdmin(false)}>&times;</button>
+              </div>
+              
+              {/* Models options */}
+              <div className="form-group" style={{ gap: '0.35rem' }}>
+                <label className="form-label" style={{ fontSize: '0.7rem' }}>Model Detektor Wajah</label>
+                <select 
+                  className="kiosk-input"
+                  value={selectedModel}
+                  onChange={handleModelChange}
+                  disabled={!faceapiLoaded}
+                  style={{ padding: '0.5rem', fontSize: '0.8rem', height: '36px' }}
+                >
+                  <option value="tiny">Tiny Face Detector (Cepat)</option>
+                  <option value="ssd">SSD MobileNet (Akurat)</option>
+                </select>
+              </div>
 
-        {/* Bottom Actions */}
-        <div style={{ width: '100%' }}>
-          {activeMode === 'scan' ? (
-            <button 
-              className="kiosk-btn-pill" 
-              onClick={() => handleModeSwitch('register')}
-              disabled={!modelsLoaded}
-            >
-              DAFTAR SEKARANG
-            </button>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '100%' }}>
-              <button 
-                className="kiosk-btn-pill kiosk-btn-primary" 
-                onClick={handleRegisterFace}
-                disabled={isRegistering || !faceDetected || !registerName.trim()}
-              >
-                {isRegistering ? <span className="spinner"></span> : 'SIMPAN WAJAH'}
-              </button>
-              <button 
-                className="drawer-mini-btn" 
-                style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.8rem', padding: '4px', alignSelf: 'center' }}
-                onClick={() => handleModeSwitch('scan')}
-                disabled={isRegistering}
-              >
-                Batal
-              </button>
-            </div>
-          )}
-        </div>
+              {/* Database Auto Setup Status */}
+              <div style={{ padding: '8px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--card-border)', borderRadius: '8px', fontSize: '0.7rem', color: 'var(--text-muted)', textAlign: 'center' }}>
+                Tabel Postgres dikonfigurasi untuk terinisiasi otomatis secara default.
+              </div>
 
-        {/* Sliding Admin Drawer Overlay */}
-        <div className={`admin-drawer ${showAdmin ? 'open' : ''}`}>
-          <div className="drawer-header">
-            <h3 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Pengaturan & Basis Data</h3>
-            <button className="drawer-close-btn" onClick={() => setShowAdmin(false)}>&times;</button>
-          </div>
-          
-          {/* Models options */}
-          <div className="form-group" style={{ gap: '0.35rem' }}>
-            <label className="form-label" style={{ fontSize: '0.7rem' }}>Model Detektor Wajah</label>
-            <select 
-              className="kiosk-input"
-              value={selectedModel}
-              onChange={handleModelChange}
-              disabled={!faceapiLoaded}
-              style={{ padding: '0.5rem', fontSize: '0.8rem', height: '36px' }}
-            >
-              <option value="tiny">Tiny Face Detector (Cepat)</option>
-              <option value="ssd">SSD MobileNet (Akurat)</option>
-            </select>
-          </div>
-
-          {/* Database Setup */}
-          <button 
-            className="drawer-mini-btn" 
-            style={{ width: '100%', padding: '0.5rem', height: '36px' }}
-            onClick={handleDbSetup}
-            disabled={isDbSettingUp}
-          >
-            {isDbSettingUp ? <span className="spinner"></span> : 'Inisialisasi Tabel Postgres'}
-          </button>
-
-          {/* Registered Signatures list */}
-          <div style={{ flexGrow: 1, display: 'flex', flexDirection: 'column', gap: '0.35rem', overflow: 'hidden' }}>
-            <span className="form-label" style={{ fontSize: '0.7rem' }}>Biometrik Terdaftar ({registeredUsers.length})</span>
-            
-            <div className="drawer-list">
-              {isDbLoading ? (
-                <div style={{ display: 'flex', justifyContent: 'center', padding: '1rem' }}>
-                  <span className="spinner"></span>
-                </div>
-              ) : registeredUsers.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '1.5rem 0', color: 'var(--text-muted)', fontSize: '0.75rem' }}>
-                  Belum ada wajah terdaftar.
-                </div>
-              ) : (
-                registeredUsers.map((user) => (
-                  <div 
-                    key={user.id} 
-                    style={{ 
-                      display: 'flex', 
-                      justifyContent: 'space-between', 
-                      alignItems: 'center', 
-                      padding: '0.5rem 0.75rem', 
-                      background: 'rgba(255,255,255,0.02)', 
-                      border: '1px solid var(--card-border)', 
-                      borderRadius: '8px',
-                      fontSize: '0.8rem'
-                    }}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column' }}>
-                      <span style={{ fontWeight: 600 }}>{user.name}</span>
-                      <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
-                        ID: {user.id} • {new Date(user.created_at).toLocaleDateString()}
-                      </span>
+              {/* Registered Signatures list */}
+              <div style={{ flexGrow: 1, display: 'flex', flexDirection: 'column', gap: '0.35rem', overflow: 'hidden' }}>
+                <span className="form-label" style={{ fontSize: '0.7rem' }}>Biometrik Terdaftar ({registeredUsers.length})</span>
+                
+                <div className="drawer-list">
+                  {isDbLoading ? (
+                    <div style={{ display: 'flex', justifyContent: 'center', padding: '1rem' }}>
+                      <span className="spinner"></span>
                     </div>
-                    
-                    <button 
-                      className="delete-btn" 
-                      onClick={() => handleDeleteFace(user.id, user.name)}
-                      style={{ padding: '2px', borderRadius: '4px' }}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                        <polyline points="3 6 5 6 21 6"></polyline>
-                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                      </svg>
-                    </button>
-                  </div>
-                ))
-              )}
+                  ) : registeredUsers.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '1.5rem 0', color: 'var(--text-muted)', fontSize: '0.75rem' }}>
+                      Belum ada wajah terdaftar.
+                    </div>
+                  ) : (
+                    registeredUsers.map((user) => (
+                      <div 
+                        key={user.id} 
+                        style={{ 
+                          display: 'flex', 
+                          justifyContent: 'space-between', 
+                          alignItems: 'center', 
+                          padding: '0.5rem 0.75rem', 
+                          background: 'rgba(255,255,255,0.02)', 
+                          border: '1px solid var(--card-border)', 
+                          borderRadius: '8px',
+                          fontSize: '0.8rem'
+                        }}
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                          <span style={{ fontWeight: 600 }}>{user.name}</span>
+                          <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                            ID: {user.id} • {new Date(user.created_at).toLocaleDateString()}
+                          </span>
+                        </div>
+                        
+                        <button 
+                          className="delete-btn" 
+                          onClick={() => handleDeleteFace(user.id, user.name)}
+                          style={{ padding: '2px', borderRadius: '4px' }}
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                          </svg>
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
-
+          </>
+        )}
+        
       </div>
     </div>
   );
