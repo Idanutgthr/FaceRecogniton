@@ -1,0 +1,398 @@
+:root {
+  --bg-primary: #080b11;
+  --bg-secondary: #0f1422;
+  --card-bg: rgba(15, 22, 42, 0.75);
+  --card-border: rgba(255, 255, 255, 0.08);
+  --color-primary: #6366f1;
+  --color-primary-glow: rgba(99, 102, 241, 0.2);
+  --color-accent: #00f2fe;
+  --color-accent-glow: rgba(0, 242, 254, 0.25);
+  --color-success: #10b981;
+  --color-success-glow: rgba(16, 185, 129, 0.2);
+  --color-error: #f43f5e;
+  --color-error-glow: rgba(244, 63, 94, 0.2);
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --radius-lg: 32px; /* Smoother, more rounded corner style as in schema */
+  --radius-md: 16px;
+  --radius-pill: 50px;
+  --font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  background-image: 
+    radial-gradient(circle at 50% 30%, rgba(99, 102, 241, 0.08) 0%, transparent 60%),
+    radial-gradient(circle at 50% 80%, rgba(0, 242, 254, 0.06) 0%, transparent 60%);
+}
+
+/* Center kiosk container */
+.kiosk-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100vw;
+  height: 100vh;
+  padding: 1rem;
+}
+
+/* Kiosk Card as in Skema.png */
+.kiosk-card {
+  width: 100%;
+  max-width: 380px;
+  height: 680px;
+  background: var(--card-bg);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  padding: 2rem 1.75rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.3s ease;
+}
+
+.kiosk-card.matching {
+  border-color: rgba(0, 242, 254, 0.4);
+  box-shadow: 0 0 30px rgba(0, 242, 254, 0.15), 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+
+.kiosk-card.matched {
+  border-color: rgba(16, 185, 129, 0.4);
+  box-shadow: 0 0 30px rgba(16, 185, 129, 0.15), 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+
+.kiosk-card.unknown {
+  border-color: rgba(244, 63, 94, 0.4);
+  box-shadow: 0 0 30px rgba(244, 63, 94, 0.15), 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+
+/* Title Header */
+.kiosk-header {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  z-index: 10;
+}
+
+.kiosk-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-primary);
+  text-align: center;
+  flex-grow: 1;
+}
+
+/* Kiosk Camera Display (Portrait Rectangle with Rounded Corners) */
+.kiosk-video-container {
+  width: 100%;
+  aspect-ratio: 3/4; /* Matches vertical style of schema.png */
+  background: #04060b;
+  border-radius: 24px;
+  overflow: hidden;
+  position: relative;
+  border: 4px solid rgba(255, 255, 255, 0.05); /* White frame style as in schema */
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
+  margin: 1.25rem 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.kiosk-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover; /* Crop camera landscape feed to fit the portrait stream nicely */
+  transform: scaleX(-1);
+}
+
+.kiosk-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  transform: scaleX(-1);
+  z-index: 12;
+}
+
+/* Scanner Line Animation */
+.kiosk-scanner-line {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  background: linear-gradient(to right, transparent, var(--color-accent), transparent);
+  box-shadow: 0 0 15px var(--color-accent);
+  z-index: 11;
+  opacity: 0.8;
+  animation: scan 2.5s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes scan {
+  0% { top: 0%; }
+  50% { top: 100%; }
+  100% { top: 0%; }
+}
+
+/* Target indicators */
+.kiosk-target {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border: 3px solid var(--color-primary);
+  pointer-events: none;
+  z-index: 10;
+}
+.kt-tl { top: 12px; left: 12px; border-right: none; border-bottom: none; border-top-left-radius: 4px; }
+.kt-tr { top: 12px; right: 12px; border-left: none; border-bottom: none; border-top-right-radius: 4px; }
+.kt-bl { bottom: 12px; left: 12px; border-right: none; border-top: none; border-bottom-left-radius: 4px; }
+.kt-br { bottom: 12px; right: 12px; border-left: none; border-top: none; border-bottom-right-radius: 4px; }
+
+/* Status Text below Camera */
+.kiosk-feedback-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.35rem;
+  margin-bottom: 1.5rem;
+  width: 100%;
+  z-index: 10;
+  height: 60px; /* Consistent spacing */
+}
+
+.kiosk-status-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.kiosk-name-label {
+  font-size: 1.15rem;
+  font-weight: 800;
+  color: #ffffff;
+  transition: color 0.3s;
+}
+
+.kiosk-name-label.detected {
+  color: var(--color-accent);
+}
+
+.kiosk-name-label.matched {
+  color: var(--color-success);
+  text-shadow: 0 0 10px var(--color-success-glow);
+}
+
+.kiosk-name-label.unknown {
+  color: var(--color-error);
+  text-shadow: 0 0 10px var(--color-error-glow);
+}
+
+/* Pill Action Button at the Bottom */
+.kiosk-btn-pill {
+  width: 100%;
+  background: #ffffff;
+  color: #080b11;
+  border: none;
+  border-radius: var(--radius-pill);
+  padding: 1.1rem 2rem;
+  font-size: 0.95rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(255, 255, 255, 0.15);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  z-index: 10;
+}
+
+.kiosk-btn-pill:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 30px rgba(255, 255, 255, 0.25);
+  background: #ffffff;
+  filter: brightness(1.05);
+}
+
+.kiosk-btn-pill:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.kiosk-btn-pill:disabled {
+  background: rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.4);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.kiosk-btn-primary {
+  background: linear-gradient(135deg, var(--color-primary), #4facfe);
+  color: #ffffff;
+  box-shadow: 0 8px 24px var(--color-primary-glow);
+}
+
+.kiosk-btn-primary:hover:not(:disabled) {
+  box-shadow: 0 12px 30px rgba(99, 102, 241, 0.4);
+}
+
+/* Tiny Admin Toggle Icon */
+.admin-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0.5rem;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.admin-toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+/* Sliding Admin Drawer Panel */
+.admin-drawer {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 85%;
+  background: #0d1220;
+  border-top: 1px solid var(--card-border);
+  border-top-left-radius: 28px;
+  border-top-right-radius: 28px;
+  z-index: 20;
+  transform: translateY(105%);
+  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  padding: 1.75rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.6);
+}
+
+.admin-drawer.open {
+  transform: translateY(0);
+}
+
+.drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--card-border);
+  padding-bottom: 0.75rem;
+}
+
+.drawer-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1.25rem;
+  font-weight: bold;
+}
+
+.drawer-close-btn:hover {
+  color: #ffffff;
+}
+
+/* List Layout in Drawer */
+.drawer-list {
+  flex-grow: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding-right: 0.25rem;
+}
+
+/* Reused input styling */
+.kiosk-input {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 1rem;
+  color: #ffffff;
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.kiosk-input:focus {
+  border-color: var(--color-primary);
+}
+
+.drawer-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: auto;
+}
+
+.drawer-mini-btn {
+  flex: 1;
+  padding: 0.6rem 1rem;
+  border-radius: var(--radius-md);
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid var(--card-border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+}
+
+.drawer-mini-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
